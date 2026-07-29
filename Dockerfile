@@ -6,6 +6,8 @@ FROM python:3.12-slim
 #  - ghostscript          : xử lý/ghép PDF
 #  - unpaper              : cho --clean (khử nhiễu)
 #  - pngquant             : cho --optimize
+#  - libzbar0             : giải mã barcode (pyzbar)
+#  - libglib2.0-0         : OpenCV headless cần (dò QR/barcode, phát hiện trang trắng)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         tesseract-ocr-vie \
@@ -14,13 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unpaper \
         pngquant \
         libzbar0 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py splitter.py ./
+COPY app.py splitter.py analyzer.py ./
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

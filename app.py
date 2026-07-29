@@ -10,9 +10,11 @@ import tempfile
 import uuid
 import logging
 
+import anyio
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
+from analyzer import analyze_pdf
 from splitter import split_pdf
 
 logging.basicConfig(level=logging.INFO)
@@ -20,8 +22,9 @@ log = logging.getLogger("ocr-api")
 
 app = FastAPI(
     title="OCR API",
-    description="Chuyển PDF scan thành PDF 2 lớp (searchable) bằng OCRmyPDF.",
-    version="1.0.0",
+    description="OCR PDF scan thành PDF 2 lớp, tách PDF theo mã QR/barcode, "
+                "và phân loại từng trang (mã QR / mã vạch / trang trắng).",
+    version="1.1.0",
 )
 
 # Thư mục tạm để chứa file trong lúc xử lý
@@ -70,6 +73,40 @@ def _ocr_bytes(pdf_bytes: bytes, lang: str) -> bytes:
 def _safe_name(s: str) -> str:
     """Làm sạch chuỗi barcode để dùng làm tên file."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_") or "doc"
+
+
+@app.post("/analyze")
+async def analyze(
+    file: UploadFile = File(..., description="PDF cần phân loại từng trang"),
+    dpi: int = Query(150, ge=72, le=400, description="Độ phân giải render trang khi dò mã"),
+    marker: str = Query("TACH", description="Chuỗi con trong mã để coi trang là trang phân cách"),
+    blank_threshold: float = Query(
+        0.002, ge=0.0, le=0.5,
+        description="Tỉ lệ pixel có mực tối đa để coi là trang trắng (0.002 = 0.2%)",
+    ),
+):
+    """
+    Quét từng trang và phân loại: `qr`, `barcode`, `blank` (trang trắng) hoặc `content`.
+    Không tách file, không OCR — chỉ trả về JSON để client đánh dấu lên bản xem trước.
+    """
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(415, "Chỉ nhận file PDF.")
+
+    data = await file.read()
+    if MAX_BYTES is not None and len(data) > MAX_BYTES:
+        raise HTTPException(413, f"File vượt quá {MAX_BYTES // (1024*1024)}MB.")
+
+    try:
+        # Dò mã là tác vụ CPU-bound -> đẩy sang threadpool để không chặn event loop.
+        result = await anyio.to_thread.run_sync(
+            lambda: analyze_pdf(data, dpi=dpi, blank_threshold=blank_threshold, marker=marker)
+        )
+    except Exception as e:
+        log.exception("Phân tích thất bại")
+        raise HTTPException(500, f"Phân tích thất bại: {e}")
+
+    result["filename"] = file.filename or ""
+    return result
 
 
 @app.post("/split")
@@ -166,7 +203,6 @@ async def ocr_pdf(
 
     try:
         # ocrmypdf.ocr là CPU-bound & blocking -> chạy trong threadpool
-        import anyio
         await anyio.to_thread.run_sync(
             lambda: ocrmypdf.ocr(in_path, out_path, **kwargs)
         )

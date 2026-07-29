@@ -6,3 +6,6 @@ anyio>=4.0
 pymupdf>=1.24
 pyzbar>=0.1.9
 pillow>=10.0
+numpy>=1.26
+# 4.8 trở lên: module barcode đã nằm trong bản chính, không cần opencv-contrib.
+opencv-python-headless>=4.8
