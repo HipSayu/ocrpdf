@@ -26,7 +26,11 @@ app = FastAPI(
 
 # Thư mục tạm để chứa file trong lúc xử lý
 WORK_DIR = tempfile.gettempdir()
-MAX_BYTES = 100 * 1024 * 1024  # giới hạn 100MB, chỉnh theo nhu cầu
+
+# Giới hạn dung lượng upload (MB). Đặt qua biến môi trường OCR_MAX_MB.
+# Mặc định 0 = không giới hạn. Đặt số > 0 để bật giới hạn (vd OCR_MAX_MB=500).
+_max_mb = int(os.environ.get("OCR_MAX_MB", "0"))
+MAX_BYTES = _max_mb * 1024 * 1024 if _max_mb > 0 else None
 
 
 def _cleanup(*paths: str) -> None:
@@ -82,7 +86,7 @@ async def split(
         raise HTTPException(415, "Chỉ nhận file PDF.")
 
     data = await file.read()
-    if len(data) > MAX_BYTES:
+    if MAX_BYTES is not None and len(data) > MAX_BYTES:
         raise HTTPException(413, f"File vượt quá {MAX_BYTES // (1024*1024)}MB.")
 
     try:
@@ -138,7 +142,7 @@ async def ocr_pdf(
 
     # Đọc & lưu file upload, kiểm tra dung lượng
     data = await file.read()
-    if len(data) > MAX_BYTES:
+    if MAX_BYTES is not None and len(data) > MAX_BYTES:
         raise HTTPException(413, f"File vượt quá {MAX_BYTES // (1024*1024)}MB.")
     with open(in_path, "wb") as f:
         f.write(data)
