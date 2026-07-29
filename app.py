@@ -3,13 +3,17 @@ OCR API — bọc OCRmyPDF thành REST endpoint.
 Đầu vào: 1 file PDF (scan). Đầu ra: PDF 2 lớp (ảnh gốc + lớp text ẩn).
 """
 import os
+import io
+import re
+import zipfile
 import tempfile
 import uuid
 import logging
 
-import ocrmypdf
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
+
+from splitter import split_pdf
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ocr-api")
@@ -40,6 +44,76 @@ def health():
     return {"status": "ok"}
 
 
+def _ocr_bytes(pdf_bytes: bytes, lang: str) -> bytes:
+    """OCR một PDF (dạng bytes) -> trả PDF 2 lớp (bytes). Dùng cho từng file sau khi tách."""
+    import ocrmypdf
+    tmp_in = os.path.join(WORK_DIR, f"{uuid.uuid4().hex}_in.pdf")
+    tmp_out = os.path.join(WORK_DIR, f"{uuid.uuid4().hex}_out.pdf")
+    try:
+        with open(tmp_in, "wb") as f:
+            f.write(pdf_bytes)
+        ocrmypdf.ocr(
+            tmp_in, tmp_out,
+            language=lang, deskew=True, rotate_pages=True,
+            skip_text=True, progress_bar=False, output_type="pdf",
+        )
+        with open(tmp_out, "rb") as f:
+            return f.read()
+    finally:
+        _cleanup(tmp_in, tmp_out)
+
+
+def _safe_name(s: str) -> str:
+    """Làm sạch chuỗi barcode để dùng làm tên file."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_") or "doc"
+
+
+@app.post("/split")
+async def split(
+    background: BackgroundTasks,
+    file: UploadFile = File(..., description="PDF gộp nhiều văn bản, ngăn nhau bằng trang phân cách có barcode"),
+    marker: str = Query("TACH", description="Chuỗi con phải có trong barcode để coi là trang phân cách"),
+    drop_separator: bool = Query(True, description="True: bỏ trang phân cách khỏi kết quả"),
+    dpi: int = Query(200, ge=100, le=400, description="Độ phân giải render trang khi dò barcode"),
+    ocr: bool = Query(False, description="True: OCR (tạo PDF 2 lớp) cho từng văn bản sau khi tách"),
+    lang: str = Query("vie+eng", description="Ngôn ngữ OCR (chỉ dùng khi ocr=true)"),
+):
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(415, "Chỉ nhận file PDF.")
+
+    data = await file.read()
+    if len(data) > MAX_BYTES:
+        raise HTTPException(413, f"File vượt quá {MAX_BYTES // (1024*1024)}MB.")
+
+    try:
+        docs = split_pdf(data, marker=marker, drop_separator=drop_separator, dpi=dpi)
+    except Exception as e:
+        log.exception("Tách thất bại")
+        raise HTTPException(500, f"Tách thất bại: {e}")
+
+    if not docs:
+        raise HTTPException(422, "Không tách được văn bản nào (kiểm tra lại marker hoặc chất lượng scan).")
+
+    base = os.path.splitext(file.filename or "output")[0]
+    zip_path = os.path.join(WORK_DIR, f"{uuid.uuid4().hex}.zip")
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for d in docs:
+            content = _ocr_bytes(d["bytes"], lang) if ocr else d["bytes"]
+            # tên file: ưu tiên dùng nội dung barcode nếu có, kèm số thứ tự
+            tag = _safe_name(d["marker_data"]) if d.get("marker_data") else "part"
+            name = f"{base}_{d['index']:03d}_{tag}.pdf"
+            zf.writestr(name, content)
+
+    background.add_task(_cleanup, zip_path)
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"{base}_split.zip",
+        background=background,
+    )
+
+
 @app.post("/ocr")
 async def ocr_pdf(
     background: BackgroundTasks,
@@ -57,6 +131,7 @@ async def ocr_pdf(
     if file.content_type not in ("application/pdf", "application/octet-stream"):
         raise HTTPException(415, "Chỉ nhận file PDF.")
 
+    import ocrmypdf
     job_id = uuid.uuid4().hex
     in_path = os.path.join(WORK_DIR, f"{job_id}_in.pdf")
     out_path = os.path.join(WORK_DIR, f"{job_id}_out.pdf")

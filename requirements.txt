@@ -3,3 +3,6 @@ uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 ocrmypdf>=16.0
 anyio>=4.0
+pymupdf>=1.24
+pyzbar>=0.1.9
+pillow>=10.0

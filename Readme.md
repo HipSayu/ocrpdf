@@ -1,6 +1,9 @@
 # OCR API (OCRmyPDF)
 
-REST API: POST một PDF scan vào → nhận về PDF 2 lớp (ảnh gốc + lớp text ẩn, searchable).
+Hai chức năng:
+1. **`/ocr`** — POST một PDF scan → nhận về PDF 2 lớp (ảnh gốc + lớp text ẩn, searchable).
+2. **`/split`** — POST một PDF gộp nhiều văn bản (ngăn nhau bằng trang phân cách có barcode)
+   → nhận về file `.zip` chứa từng văn bản riêng. Tùy chọn OCR luôn từng file.
 
 ## Chạy bằng Docker (khuyến nghị)
 
@@ -11,13 +14,33 @@ docker build -t ocr-api .
 docker run -p 8000:8000 ocr-api
 ```
 
-## Chạy trực tiếp (local, không Docker)
+## Chạy trực tiếp trên Windows (không Docker)
+
+Cài các phần mềm hệ thống rồi thêm PATH:
+- **Tesseract OCR** (UB Mannheim build) — nhớ tick chọn gói ngôn ngữ **Vietnamese** khi cài.
+- **Ghostscript** (bản Windows 64-bit).
+- (Tùy chọn) **unpaper**, **pngquant** nếu dùng `--clean` / `--optimize`.
+
+`pyzbar` trên Windows đã kèm sẵn DLL của zbar (không cần cài libzbar riêng),
+nhưng có thể cần **Visual C++ Redistributable 2013** nếu báo lỗi thiếu DLL.
+
+Sau đó:
+
+```bat
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+Nếu Tesseract/Ghostscript không nằm trong PATH, thêm biến môi trường hoặc trỏ
+đường dẫn cho OCRmyPDF trước khi chạy.
+
+## Chạy trực tiếp (Linux/macOS, không Docker)
 
 Cần cài system deps trước:
 
 ```bash
 # Ubuntu/Debian
-sudo apt install tesseract-ocr tesseract-ocr-vie ghostscript unpaper pngquant
+sudo apt install tesseract-ocr tesseract-ocr-vie ghostscript unpaper pngquant libzbar0
 
 pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 8000
@@ -35,7 +58,27 @@ curl -X POST "http://localhost:8000/ocr?lang=vie+eng&deskew=true" \
      -OJ
 ```
 
-## Tham số (query string)
+### Tách văn bản theo trang phân cách
+
+```bash
+# Tách, không OCR -> ra zip các văn bản
+curl -X POST "http://localhost:8000/split?marker=TACH" \
+     -F "file=@merged.pdf" -OJ
+
+# Tách + OCR luôn từng văn bản thành PDF 2 lớp
+curl -X POST "http://localhost:8000/split?marker=TACH&ocr=true&lang=vie+eng" \
+     -F "file=@merged.pdf" -OJ
+```
+
+Trang phân cách được nhận diện bằng barcode có nội dung chứa chuỗi `marker`
+(vd barcode `NAMSAO-TACH` khớp `marker=TACH`). Mặc định trang phân cách bị loại
+khỏi kết quả. Hoạt động với cả trang scan bị xoay ngược (thử 4 hướng).
+
+Tham số `/split`: `marker` (chuỗi con trong barcode), `drop_separator` (bỏ trang
+phân cách, mặc định true), `dpi` (độ phân giải dò barcode, mặc định 200),
+`ocr` (OCR từng file, mặc định false), `lang` (ngôn ngữ OCR).
+
+## Tham số /ocr (query string)
 
 | Tham số   | Mặc định   | Ý nghĩa |
 |-----------|------------|---------|
