@@ -6,6 +6,8 @@ Ba chức năng:
    → nhận về file `.zip` chứa từng văn bản riêng. Tùy chọn OCR luôn từng file.
 3. **`/analyze`** — POST một PDF → nhận về JSON phân loại từng trang: có mã QR, có mã vạch,
    trang trắng hay trang nội dung, kèm khung bao của mã. Không tách file, không OCR.
+   Bản **`/analyze/stream`** trả NDJSON theo từng trang (`{"progress":{"page":5,"total":169}}` …
+   rồi `{"result":…}`) để client vẽ được thanh tiến trình thật.
 
 ## Chạy bằng Docker (khuyến nghị)
 

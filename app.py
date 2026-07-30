@@ -2,9 +2,11 @@
 OCR API — bọc OCRmyPDF thành REST endpoint.
 Đầu vào: 1 file PDF (scan). Đầu ra: PDF 2 lớp (ảnh gốc + lớp text ẩn).
 """
+import asyncio
 import os
 import io
 import json
+import queue
 import re
 import zipfile
 import tempfile
@@ -13,7 +15,7 @@ import logging
 
 import anyio
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from analyzer import analyze_pdf
 from splitter import split_pdf
@@ -118,6 +120,65 @@ async def analyze(
 
     result["filename"] = file.filename or ""
     return result
+
+
+@app.post("/analyze/stream")
+async def analyze_stream(
+    file: UploadFile = File(..., description="PDF cần phân loại từng trang"),
+    dpi: int = Query(150, ge=72, le=400, description="Độ phân giải render trang khi dò mã"),
+    marker: str = Query("", description="Để trống: mọi trang có mã đều là trang phân cách"),
+    blank_threshold: float = Query(0.002, ge=0.0, le=0.5, description="Ngưỡng coi là trang trắng"),
+):
+    """
+    Giống `/analyze` nhưng trả về **NDJSON theo dòng** để client vẽ được thanh tiến trình thật:
+
+        {"progress": {"page": 5, "total": 169}}
+        ...
+        {"result": { ...giống hệt /analyze... }}
+
+    Nếu lỗi giữa đường thì dòng cuối là `{"error": "..."}` (HTTP vẫn 200 vì header đã gửi đi rồi).
+    """
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(415, "Chỉ nhận file PDF.")
+
+    data = await file.read()
+    if MAX_BYTES is not None and len(data) > MAX_BYTES:
+        raise HTTPException(413, f"File vượt quá {MAX_BYTES // (1024*1024)}MB.")
+
+    name = file.filename or ""
+    # Hàng đợi nối luồng worker (CPU-bound) với generator async đang stream ra client.
+    q: "queue.Queue[dict | None]" = queue.Queue()
+
+    def work():
+        try:
+            res = analyze_pdf(
+                data, dpi=dpi, blank_threshold=blank_threshold, marker=marker,
+                progress=lambda done, total: q.put({"progress": {"page": done, "total": total}}),
+            )
+            res["filename"] = name
+            q.put({"result": res})
+        except Exception as e:
+            log.exception("Phân tích thất bại")
+            q.put({"error": f"Phân tích thất bại: {e}"})
+        finally:
+            q.put(None)
+
+    async def stream():
+        worker = asyncio.create_task(anyio.to_thread.run_sync(work))
+        try:
+            while True:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    await asyncio.sleep(0.05)
+                    continue
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        finally:
+            await worker
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 @app.post("/split")
