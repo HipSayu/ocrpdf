@@ -66,38 +66,48 @@ curl -X POST "http://localhost:8000/ocr?lang=vie+eng&deskew=true" \
 
 ```bash
 # Tách, không OCR -> ra zip các văn bản
-curl -X POST "http://localhost:8000/split?marker=TACH" \
-     -F "file=@merged.pdf" -OJ
+curl -X POST "http://localhost:8000/split" -F "file=@merged.pdf" -OJ
 
 # Tách + OCR luôn từng văn bản thành PDF 2 lớp
-curl -X POST "http://localhost:8000/split?marker=TACH&ocr=true&lang=vie+eng" \
+curl -X POST "http://localhost:8000/split?ocr=true&lang=vie+eng" \
      -F "file=@merged.pdf" -OJ
 ```
 
-Trang phân cách được nhận diện bằng barcode có nội dung chứa chuỗi `marker`
-(vd barcode `NAMSAO-TACH` khớp `marker=TACH`). Mặc định trang phân cách bị loại
-khỏi kết quả. Hoạt động với cả trang scan bị xoay ngược (thử 4 hướng).
+Trang phân cách = trang **phát hiện được** mã QR / mã vạch, không cần giải mã được
+nội dung mã. Nhờ vậy vẫn cắt đúng ở những tờ phân cách bị scan mờ/nhoè. Mặc định
+trang phân cách bị loại khỏi kết quả. Bộ dò bất biến với góc xoay nên trang scan
+ngược vẫn nhận ra.
 
-Tham số `/split`: `marker` (chuỗi con trong barcode), `drop_separator` (bỏ trang
-phân cách, mặc định true), `dpi` (độ phân giải dò barcode, mặc định 200),
-`ocr` (OCR từng file, mặc định false), `lang` (ngôn ngữ OCR).
+Tham số `/split`: `marker` (**để trống = cắt tại mọi trang có mã**; điền chuỗi để chỉ
+cắt ở mã chứa chuỗi đó — dùng khi văn bản có sẵn QR chữ ký số / mã tra cứu không muốn
+cắt), `drop_separator` (bỏ trang phân cách, mặc định true), `dpi` (độ phân giải dò mã,
+mặc định 200), `ocr` (OCR từng file, mặc định false), `lang` (ngôn ngữ OCR),
+`separators` + `separator_values` (xem dưới).
+
+Nếu client đã gọi `/analyze` trước thì truyền lại danh sách trang phân cách qua
+`separators=2,4,6…`, máy chủ bỏ hẳn bước dò mã. Đo trên file thật 169 trang / 65.7 MB:
+**19.5s → 0.1s**. Quan trọng hơn: tránh được việc `/analyze` và `/split` chạy song song
+tranh CPU (cả hai đều CPU-bound), và kết quả tách đúng bằng bản xem trước.
 
 ### Phân loại trang (không tách file)
 
 ```bash
-curl -X POST "http://localhost:8000/analyze?dpi=150&marker=TACH" -F "file=@merged.pdf"
+curl -X POST "http://localhost:8000/analyze?dpi=150" -F "file=@merged.pdf"
 ```
 
 Trả về JSON: mỗi trang có `type` (`qr` / `barcode` / `blank` / `content`), khung bao `boxes`
-của mã (toạ độ chuẩn hoá 0..1), `value` (nội dung mã nếu giải mã được) và `separator`.
+của mã (toạ độ chuẩn hoá 0..1), `value` (nội dung mã nếu đọc được — chỉ để hiển thị) và
+`separator` (có phải điểm cắt không).
 
-Khác với `/split`, endpoint này chỉ cần **phát hiện** có mã trên trang — dựa vào đặc trưng
-hình học của QR (`cv2.QRCodeDetector`) và mã vạch 1D (`cv2.barcode`) — nên vẫn thấy được mã
-mờ/nhoè mà zbar không giải mã nổi. Trang trắng nhận ra bằng tỉ lệ điểm ảnh có mực sau khi
-cắt viền (bỏ mép đen máy scan, lỗ bấm ghim) và khử hạt nhiễu.
+Mã được tìm bằng đặc trưng hình học — QR qua `cv2.QRCodeDetector`, mã vạch 1D qua
+`cv2.barcode` — nên thấy được cả mã mờ/nhoè mà zbar không giải mã nổi. Trang trắng nhận ra
+bằng tỉ lệ điểm ảnh có mực sau khi cắt viền (bỏ mép đen máy scan, lỗ bấm ghim) và khử hạt nhiễu.
 
-Tham số: `dpi` (mặc định 150), `marker`, `blank_threshold` (mặc định 0.002 = 0.2%).
-Xem chi tiết trong [`../api.md`](../api.md).
+`/analyze` và `/split` dùng chung module `analyzer.py` cho bước dò mã và chung hàm
+`is_separator()`, nên chỗ `/analyze` báo "sẽ cắt" đúng bằng chỗ `/split` cắt thật.
+
+Tham số: `dpi` (mặc định 150), `marker` (để trống = mọi trang có mã đều là điểm cắt),
+`blank_threshold` (mặc định 0.002 = 0.2%). Xem chi tiết trong [`../api.md`](../api.md).
 
 ## Tham số /ocr (query string)
 

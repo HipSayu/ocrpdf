@@ -4,6 +4,7 @@ OCR API — bọc OCRmyPDF thành REST endpoint.
 """
 import os
 import io
+import json
 import re
 import zipfile
 import tempfile
@@ -11,7 +12,7 @@ import uuid
 import logging
 
 import anyio
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
 from analyzer import analyze_pdf
@@ -70,16 +71,26 @@ def _ocr_bytes(pdf_bytes: bytes, lang: str) -> bytes:
         _cleanup(tmp_in, tmp_out)
 
 
-def _safe_name(s: str) -> str:
-    """Làm sạch chuỗi barcode để dùng làm tên file."""
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_") or "doc"
+def _safe_name(s: str, max_len: int = 40) -> str:
+    """
+    Làm sạch chuỗi mã để dùng làm tên file.
+
+    Cắt ngắn vì nội dung mã có thể rất dài (URL, vCard…) — nối vào tên gốc dễ vượt
+    giới hạn 260 ký tự đường dẫn của Windows.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
+    return cleaned[:max_len].strip("_") or "doc"
 
 
 @app.post("/analyze")
 async def analyze(
     file: UploadFile = File(..., description="PDF cần phân loại từng trang"),
     dpi: int = Query(150, ge=72, le=400, description="Độ phân giải render trang khi dò mã"),
-    marker: str = Query("TACH", description="Chuỗi con trong mã để coi trang là trang phân cách"),
+    marker: str = Query(
+        "",
+        description="Để trống (mặc định): mọi trang có mã QR/mã vạch đều là trang phân cách. "
+                    "Điền chuỗi nếu chỉ muốn cắt ở mã có nội dung chứa chuỗi đó.",
+    ),
     blank_threshold: float = Query(
         0.002, ge=0.0, le=0.5,
         description="Tỉ lệ pixel có mực tối đa để coi là trang trắng (0.002 = 0.2%)",
@@ -112,12 +123,26 @@ async def analyze(
 @app.post("/split")
 async def split(
     background: BackgroundTasks,
-    file: UploadFile = File(..., description="PDF gộp nhiều văn bản, ngăn nhau bằng trang phân cách có barcode"),
-    marker: str = Query("TACH", description="Chuỗi con phải có trong barcode để coi là trang phân cách"),
+    file: UploadFile = File(..., description="PDF gộp nhiều văn bản, ngăn nhau bằng trang phân cách có mã"),
+    marker: str = Query(
+        "",
+        description="Để trống (mặc định): cắt tại MỌI trang phát hiện được mã QR/mã vạch, "
+                    "không cần giải mã được nội dung. Điền chuỗi để chỉ cắt ở mã chứa chuỗi đó.",
+    ),
     drop_separator: bool = Query(True, description="True: bỏ trang phân cách khỏi kết quả"),
     dpi: int = Query(200, ge=100, le=400, description="Độ phân giải render trang khi dò barcode"),
     ocr: bool = Query(False, description="True: OCR (tạo PDF 2 lớp) cho từng văn bản sau khi tách"),
     lang: str = Query("vie+eng", description="Ngôn ngữ OCR (chỉ dùng khi ocr=true)"),
+    separators: str = Query(
+        "",
+        description="Danh sách số trang phân cách đã biết, cách nhau bằng dấu phẩy (vd \"2,4,6\"). "
+                    "Truyền vào để bỏ qua bước dò mã — dùng khi client đã gọi /analyze trước đó.",
+    ),
+    separator_values: str = Form(
+        "",
+        description="JSON {\"<số trang>\": \"<nội dung mã>\"} — nội dung mã của các trang phân cách, "
+                    "chỉ dùng để đặt tên tệp. Đi kèm 'separators'.",
+    ),
 ):
     if file.content_type not in ("application/pdf", "application/octet-stream"):
         raise HTTPException(415, "Chỉ nhận file PDF.")
@@ -126,14 +151,40 @@ async def split(
     if MAX_BYTES is not None and len(data) > MAX_BYTES:
         raise HTTPException(413, f"File vượt quá {MAX_BYTES // (1024*1024)}MB.")
 
+    sep_pages: list[int] | None = None
+    if separators.strip():
+        try:
+            sep_pages = [int(x) for x in separators.replace(" ", "").split(",") if x]
+        except ValueError:
+            raise HTTPException(422, "Tham số 'separators' phải là các số trang cách nhau bằng dấu phẩy.")
+
+    sep_values: dict[int, str] | None = None
+    # lstrip BOM: một số client ghi UTF-8 kèm BOM, json.loads sẽ chết vì ký tự đó.
+    if separator_values.strip().lstrip("﻿"):
+        try:
+            raw = json.loads(separator_values.lstrip("﻿"))
+            sep_values = {int(k): str(v) for k, v in raw.items() if v}
+        except Exception:
+            raise HTTPException(422, "Tham số 'separator_values' phải là JSON dạng {\"số trang\": \"nội dung mã\"}.")
+
     try:
-        docs = split_pdf(data, marker=marker, drop_separator=drop_separator, dpi=dpi)
+        # Dò mã là tác vụ CPU-bound -> threadpool, để không chặn các request khác.
+        docs = await anyio.to_thread.run_sync(
+            lambda: split_pdf(
+                data, marker=marker, drop_separator=drop_separator,
+                dpi=dpi, separators=sep_pages, separator_values=sep_values,
+            )
+        )
     except Exception as e:
         log.exception("Tách thất bại")
         raise HTTPException(500, f"Tách thất bại: {e}")
 
     if not docs:
-        raise HTTPException(422, "Không tách được văn bản nào (kiểm tra lại marker hoặc chất lượng scan).")
+        raise HTTPException(
+            422,
+            "Không tách được văn bản nào — không phát hiện được mã QR/mã vạch nào trên tài liệu "
+            "(thử tăng dpi, hoặc kiểm tra lại chất lượng bản scan).",
+        )
 
     base = os.path.splitext(file.filename or "output")[0]
     zip_path = os.path.join(WORK_DIR, f"{uuid.uuid4().hex}.zip")
